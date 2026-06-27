@@ -6,9 +6,9 @@ Local Chinese recording transcription and document generation for the Mac mini w
 
 普通用户可直接从 GitHub Release 下载 DMG：
 
-- 当前版本：`v2026.06.14.1`
-- 下载页：https://github.com/linchenhao921019-ux/local-audio-transcriber/releases/tag/v2026.06.14.1
-- DMG 文件：https://github.com/linchenhao921019-ux/local-audio-transcriber/releases/download/v2026.06.14.1/default.dmg
+- 版本号按上传备份日期生成，例如 `v2026.06.07`。
+- 同一天多次上传时自动递增为 `v2026.06.07.01`、`v2026.06.07.02`，以此类推。
+- 下载页：https://github.com/linchenhao921019-ux/local-audio-transcriber/releases
 
 已生成并安装本地应用：
 
@@ -70,6 +70,9 @@ open "/Applications/本地音频转录.app"
 ```bash
 ./sync_to_github.sh
 ```
+
+默认版本号按上传备份当天生成：`vYYYY.MM.DD`。如果当天已有备份，会自动使用 `.01`、`.02` 等两位序号。
+同步脚本生成的 DMG 也会使用同一个版本号命名，例如 `dist/v2026.06.07.dmg`。
 
 ## Install
 
