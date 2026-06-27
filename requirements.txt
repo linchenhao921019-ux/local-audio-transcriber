@@ -1,0 +1,5 @@
+av
+funasr-onnx
+jieba
+python-docx
+setuptools<81

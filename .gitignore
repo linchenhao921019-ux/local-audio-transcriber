@@ -1,0 +1,28 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local environments and generated outputs
+.venv/
+outputs/
+docx_rendered/
+chunks/
+dist/
+
+# Bundled/offline model caches are too large for git.
+modelscope_cache/
+vosk_models/
+
+# Local recordings, transcripts, and generated meeting documents
+*.wav
+*.mp3
+*.mp4
+*.mov
+*.m4a
+full_transcript_*.txt
+sample_transcript_*.txt
+*_会议纪要.*
+*_详细谈话纪要.*
+
+# Native build artifacts
+transcribe_speech
