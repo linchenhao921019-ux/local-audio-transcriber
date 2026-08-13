@@ -134,7 +134,11 @@ final class MediaDropView: NSVisualEffectView {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextFieldDelegate {
+    private enum PreferenceKey {
+        static let outputDirectory = "outputDirectory"
+    }
+
     private struct JobConfig {
         let audioURL: URL
         let outputDir: URL
@@ -280,7 +284,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             resultCard.heightAnchor.constraint(greaterThanOrEqualToConstant: 230)
         ])
 
-        outputField.stringValue = "\(NSHomeDirectory())/本地录音转录文件包/转录资料"
+        restoreOutputDirectory()
+        outputField.delegate = self
         titleField.placeholderString = "留空则使用文件名"
         audioField.placeholderString = "选择或拖入 wav、mp3、mp4、mov、m4a"
         wordCheck.state = .on
@@ -726,6 +731,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         appendLog("已选择文件：\(url.path)")
     }
 
+    private var defaultOutputDirectoryPath: String {
+        "\(NSHomeDirectory())/本地录音转录文件包/转录资料"
+    }
+
+    private func restoreOutputDirectory() {
+        let savedPath = UserDefaults.standard.string(forKey: PreferenceKey.outputDirectory)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let savedPath, !savedPath.isEmpty {
+            outputField.stringValue = savedPath
+        } else {
+            outputField.stringValue = defaultOutputDirectoryPath
+        }
+    }
+
+    private func persistOutputDirectory() {
+        let enteredPath = outputField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let path = enteredPath.isEmpty ? defaultOutputDirectoryPath : enteredPath.expandingTildeInPath
+        let standardizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        outputField.stringValue = standardizedPath
+        UserDefaults.standard.set(standardizedPath, forKey: PreferenceKey.outputDirectory)
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField, field === outputField else {
+            return
+        }
+        persistOutputDirectory()
+    }
+
     @objc private func chooseOutput() {
         let panel = NSOpenPanel()
         panel.title = "选择输出目录"
@@ -733,10 +767,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         panel.canChooseDirectories = true
         if panel.runModal() == .OK, let url = panel.url {
             outputField.stringValue = url.path
+            persistOutputDirectory()
         }
     }
 
     @objc private func openOutputDirectory() {
+        persistOutputDirectory()
         let url = URL(fileURLWithPath: outputField.stringValue.expandingTildeInPath)
         try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         NSWorkspace.shared.open(url)
@@ -765,6 +801,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return
         }
         exiting = true
+        persistOutputDirectory()
+        UserDefaults.standard.synchronize()
         cancelled = true
         currentProcess?.terminate()
         currentProcess = nil
@@ -846,6 +884,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             showAlert(title: "文件格式不支持", message: "请选择 wav、mp3、mp4、mov 或 m4a 文件。")
             return
         }
+        persistOutputDirectory()
         let chunkSeconds = automaticChunkSeconds(for: audioURL)
         if ollamaCheck.state == .on && modelPopup.selectedItem == nil {
             showAlert(title: "缺少 Ollama 模型", message: "请先刷新模型，并从下拉菜单选择一个本地模型。")
