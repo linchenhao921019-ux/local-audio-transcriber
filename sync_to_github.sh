@@ -50,7 +50,7 @@ if [[ "$TAG" != v* ]]; then
 fi
 APP_VERSION="${TAG#v}"
 COMMIT_MESSAGE="${2:-release $TAG local audio transcriber}"
-DMG_NAME="${DMG_NAME:-$TAG.dmg}"
+DMG_NAME="${DMG_NAME:-default.dmg}"
 DMG="$TOOL_DIR/dist/$DMG_NAME"
 printf '%s\n' "$APP_VERSION" > "$TOOL_DIR/RELEASE_VERSION"
 
