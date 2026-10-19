@@ -53,6 +53,10 @@ def publish(root, report, project_id):
     content_hash = hashlib.sha256(body).hexdigest()
     publication_id = hashlib.sha256((project_id + "\0" + content_hash).encode()).hexdigest()
     receipt_path = root / "元数据" / "转录报告" / (publication_id + ".json")
+    item_key = hashlib.sha256(publication_id.encode()).hexdigest()
+    deletion = root / "元数据/LocalMind" / ("items-" + item_key + ".json")
+    if deletion.exists() and json.loads(deletion.read_text()).get("value") is None:
+        raise ValueError("该报告曾在此项目库中删除，本次未重新入库。可选择其他项目库，或在网站“添加资料”中重新导入。")
     if receipt_path.exists():
         return {**json.loads(receipt_path.read_text()), "duplicate": True}
     content_root = (root / "内容").resolve()
