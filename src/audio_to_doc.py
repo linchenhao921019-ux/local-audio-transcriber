@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent
 
 
 def main():
@@ -16,13 +17,15 @@ def main():
     parser.add_argument("--chunk-seconds", type=float, default=60)
     parser.add_argument("--duration", type=float, default=None, help="Optional test limit in seconds.")
     parser.add_argument("--skip-transcribe", action="store_true", help="Use an existing transcript in the output directory.")
+    parser.add_argument("--minutes", action="store_true", help="Generate outline and meeting minutes with Hermes.")
+    parser.add_argument("--hermes-command", default=None, help="Path to the installed Hermes executable.")
     args = parser.parse_args()
 
     audio = Path(args.audio).expanduser().resolve()
     if not audio.exists():
         raise FileNotFoundError(audio)
 
-    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else SCRIPT_DIR / "outputs" / audio.stem
+    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else PROJECT_DIR / "outputs" / audio.stem
     chunks_dir = output_dir / "chunks"
     transcript = output_dir / f"{audio.stem}_transcript.txt"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -57,6 +60,14 @@ def main():
     if args.title:
         cmd.extend(["--title", args.title])
     subprocess.run(cmd, check=True)
+
+    if args.minutes:
+        cmd = [sys.executable, str(SCRIPT_DIR / "hermes_meeting_minutes.py"),
+               "--transcript", str(transcript), "--output-dir", str(output_dir),
+               "--title", args.title or f"{audio.stem} 重点大纲与会议纪要"]
+        if args.hermes_command:
+            cmd.extend(["--hermes-command", args.hermes_command])
+        subprocess.run(cmd, check=True)
 
     print("\nDone.")
     print(f"Output directory: {output_dir}")

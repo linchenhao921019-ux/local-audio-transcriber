@@ -3,13 +3,14 @@ set -euo pipefail
 
 REPO="${GITHUB_REPOSITORY:-linchenhao921019-ux/local-audio-transcriber}"
 APP_NAME="本地音频转录"
-TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SOURCE_FILES=(
   README.md
   RELEASE_VERSION
-  build_mac_app.sh
-  create_dmg.sh
-  sync_to_github.sh
+  scripts/build_mac_app.sh
+  scripts/create_dmg.sh
+  scripts/sync_to_github.sh
 )
 
 cd "$TOOL_DIR"
@@ -50,12 +51,12 @@ if [[ "$TAG" != v* ]]; then
 fi
 APP_VERSION="${TAG#v}"
 COMMIT_MESSAGE="${2:-release $TAG local audio transcriber}"
-DMG_NAME="${DMG_NAME:-default.dmg}"
-DMG="$TOOL_DIR/dist/$DMG_NAME"
+DMG_NAME="${DMG_NAME:-$TAG.dmg}"
+DMG="$TOOL_DIR/dist.noindex/$DMG_NAME"
 printf '%s\n' "$APP_VERSION" > "$TOOL_DIR/RELEASE_VERSION"
 
-RELEASE_VERSION="$APP_VERSION" bash "$TOOL_DIR/build_mac_app.sh"
-DMG_NAME="$DMG_NAME" bash "$TOOL_DIR/create_dmg.sh"
+RELEASE_VERSION="$APP_VERSION" bash "$TOOL_DIR/scripts/build_mac_app.sh"
+DMG_NAME="$DMG_NAME" bash "$TOOL_DIR/scripts/create_dmg.sh"
 
 git add -- "${SOURCE_FILES[@]}"
 if git diff --cached --quiet -- "${SOURCE_FILES[@]}"; then

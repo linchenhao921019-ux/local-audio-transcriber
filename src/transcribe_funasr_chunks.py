@@ -15,8 +15,11 @@ logging.getLogger("jieba").setLevel(logging.WARNING)
 from funasr_onnx import CT_Transformer, Paraformer
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_MODEL_DIR = SCRIPT_DIR / "modelscope_cache" / "iic" / "speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx"
-DEFAULT_PUNC_MODEL_DIR = SCRIPT_DIR / "modelscope_cache" / "damo" / "punc_ct-transformer_cn-en-common-vocab471067-large-onnx"
+PROJECT_DIR = SCRIPT_DIR.parent
+BUNDLED_MODEL_ROOT = SCRIPT_DIR / "modelscope_cache"
+MODEL_ROOT = BUNDLED_MODEL_ROOT if BUNDLED_MODEL_ROOT.exists() else PROJECT_DIR / "models" / "modelscope_cache"
+DEFAULT_MODEL_DIR = MODEL_ROOT / "iic" / "speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx"
+DEFAULT_PUNC_MODEL_DIR = MODEL_ROOT / "damo" / "punc_ct-transformer_cn-en-common-vocab471067-large-onnx"
 SENTENCE_ENDINGS = "。！？!?；;"
 
 
@@ -131,8 +134,8 @@ def main() -> None:
     args = parser.parse_args()
 
     audio = Path(args.audio).expanduser().resolve()
-    output = Path(args.output).expanduser() if args.output else SCRIPT_DIR / f"{audio.stem}_funasr_transcript.txt"
-    chunks_dir = Path(args.chunks_dir).expanduser() if args.chunks_dir else SCRIPT_DIR / "chunks" / audio.stem
+    output = Path(args.output).expanduser() if args.output else PROJECT_DIR / f"{audio.stem}_funasr_transcript.txt"
+    chunks_dir = Path(args.chunks_dir).expanduser() if args.chunks_dir else PROJECT_DIR / "chunks" / audio.stem
     model_dir = Path(args.model_dir).expanduser()
     punc_model_dir = Path(args.punc_model_dir).expanduser()
     duration = args.duration if args.duration is not None else audio_duration(str(audio))

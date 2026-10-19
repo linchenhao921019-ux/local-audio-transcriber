@@ -3,6 +3,28 @@ import Darwin
 import Foundation
 import UniformTypeIdentifiers
 
+private enum SharedKnowledgeLibraryLocator {
+    static var root: URL? {
+        let config = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/My Knowledge Library/location.json")
+        let data = try? Data(contentsOf: config)
+        let object = data.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        let relative = object["relativePath"] as? String ?? "我的知识库"
+        let libraryID = object["libraryID"] as? String ?? "my-knowledge-library-v1"
+        let volumes = (try? FileManager.default.contentsOfDirectory(at: URL(fileURLWithPath: "/Volumes", isDirectory: true), includingPropertiesForKeys: nil)) ?? []
+        var candidates = [URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(relative), URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents/" + relative)]
+        if let explicit = object["rootPath"] as? String { candidates.insert(URL(fileURLWithPath: explicit), at: 0) }
+        candidates += volumes.map { $0.appendingPathComponent(relative, isDirectory: true) }
+        for candidate in candidates {
+            let marker = candidate.appendingPathComponent(".knowledge-library.json")
+            guard let markerData = try? Data(contentsOf: marker),
+                  let markerObject = try? JSONSerialization.jsonObject(with: markerData) as? [String: Any],
+                  markerObject["libraryID"] as? String == libraryID else { continue }
+            return candidate
+        }
+        return nil
+    }
+}
+
 private extension NSView {
     var usesDarkAppearance: Bool {
         effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
@@ -144,10 +166,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         let outputDir: URL
         let chunkSeconds: Double
         let buildWord: Bool
-        let useOllama: Bool
+        let useHermes: Bool
         let title: String
-        let ollamaURL: String
-        let modelName: String?
+        let hermesCommand: String
     }
 
     private let appDir: URL
@@ -164,14 +185,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private let outputField = NSTextField()
     private let titleField = NSTextField()
     private let wordCheck = NSButton(checkboxWithTitle: "生成 Word 文档", target: nil, action: nil)
-    private let ollamaCheck = NSButton(checkboxWithTitle: "用 Ollama 生成重点大纲和会议纪要", target: nil, action: nil)
-    private let ollamaURLField = NSTextField()
-    private let modelPopup = NSPopUpButton()
-    private let modelStatus = NSTextField(labelWithString: "刷新后选择模型")
+    private let hermesCheck = NSButton(checkboxWithTitle: "用 Hermes 生成重点大纲和会议纪要", target: nil, action: nil)
+    private let hermesPathField = NSTextField()
+    private let modelSummary = NSTextField(labelWithString: "沿用 Hermes 当前配置")
+    private let modelStatus = NSTextField(labelWithString: "待检测")
     private let startButton = NSButton(title: "开始转录", target: nil, action: nil)
     private let openButton = NSButton(title: "打开输出目录", target: nil, action: nil)
-    private let refreshButton = NSButton(title: "刷新模型", target: nil, action: nil)
+    private let refreshButton = NSButton(title: "检测 Hermes", target: nil, action: nil)
     private let openPreviewButton = NSButton(title: "打开预览文件", target: nil, action: nil)
+    private let publishReportButton = NSButton(title: "存入知识库…", target: nil, action: nil)
     private let resultSegment = NSSegmentedControl(labels: ["转录预览", "运行日志"], trackingMode: .selectOne, target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "准备就绪")
     private let logView = NSTextView()
@@ -205,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         buildWindow()
-        refreshModels(silent: true)
+        checkHermes(silent: true)
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -289,19 +311,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         titleField.placeholderString = "留空则使用文件名"
         audioField.placeholderString = "选择或拖入 wav、mp3、mp4、mov、m4a"
         wordCheck.state = .on
-        ollamaURLField.stringValue = "http://127.0.0.1:11434"
+        hermesPathField.stringValue = UserDefaults.standard.string(forKey: "hermesCommand") ?? defaultHermesCommand()
+        hermesPathField.cell?.lineBreakMode = .byTruncatingMiddle
 
         startButton.target = self
         startButton.action = #selector(startOrCancel)
         openButton.target = self
         openButton.action = #selector(openOutputDirectory)
         refreshButton.target = self
-        refreshButton.action = #selector(refreshModelsButton)
+        refreshButton.action = #selector(checkHermesButton)
         openPreviewButton.target = self
         openPreviewButton.action = #selector(openPreviewFile)
         openPreviewButton.isEnabled = false
+        publishReportButton.target = self
+        publishReportButton.action = #selector(publishReport)
+        publishReportButton.isEnabled = false
 
-        appendLog("本工具在本机离线运行，支持 wav、mp3、mp4、mov、m4a。录音资料和转录结果默认保存到本机资料包。需要纪要时，请先启动 Ollama，再刷新并选择模型。")
+        appendLog("语音转录在本机离线运行，支持 wav、mp3、mp4、mov、m4a。录音资料和转录结果默认保存到本机资料包。纪要由本机 Hermes 生成，使用 Hermes 当前的模型与登录配置。")
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -328,7 +354,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         title.textColor = .white
         title.alignment = .center
 
-        let subtitle = NSTextField(labelWithString: "离线转写音频或视频音轨，并调用本机 Ollama 生成重点大纲和会议纪要")
+        let subtitle = NSTextField(labelWithString: "离线转写音频或视频音轨，并调用本机 Hermes 生成重点大纲和会议纪要")
         subtitle.font = NSFont.systemFont(ofSize: 14, weight: .medium)
         subtitle.textColor = NSColor.white.withAlphaComponent(0.82)
         subtitle.alignment = .center
@@ -370,9 +396,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         stack.addArrangedSubview(row(label: "文档标题", field: titleField, helper: "留空则使用文件名"))
         stack.addArrangedSubview(optionsRow())
         stack.addArrangedSubview(separator())
-        stack.addArrangedSubview(sectionTitle("Ollama 纪要"))
+        stack.addArrangedSubview(sectionTitle("Hermes 纪要"))
         stack.addArrangedSubview(checkRow())
-        stack.addArrangedSubview(row(label: "Ollama 地址", field: ollamaURLField, helper: "默认本机"))
+        stack.addArrangedSubview(row(label: "Hermes 程序", field: hermesPathField, buttonTitle: "选择程序", action: #selector(chooseHermes)))
         stack.addArrangedSubview(modelRow())
         stack.addArrangedSubview(actionRow())
         return card
@@ -422,7 +448,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             ])
         }
 
-        let stack = NSStackView(views: [titleRow, resultContainer])
+        styleButton(publishReportButton)
+        publishReportButton.image = NSImage(systemSymbolName: "square.and.arrow.down", accessibilityDescription: nil)
+        publishReportButton.imagePosition = .imageLeading
+        publishReportButton.toolTip = "选择项目库后存入完整报告"
+        let existing = NSButton(title: "选择已有报告…", target: self, action: #selector(chooseExistingReport))
+        styleButton(existing)
+        existing.image = NSImage(systemSymbolName: "doc", accessibilityDescription: nil)
+        existing.imagePosition = .imageLeading
+        existing.toolTip = "打开已有 Markdown 或 TXT 报告"
+        let actionSpacer = NSView()
+        let reportActions = NSStackView(views: [existing, actionSpacer, publishReportButton])
+        reportActions.orientation = .horizontal
+        reportActions.distribution = .fill
+        let stack = NSStackView(views: [titleRow, reportActions, resultContainer])
         stack.orientation = .vertical
         stack.alignment = .width
         stack.spacing = 12
@@ -646,7 +685,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     }
 
     private func checkRow() -> NSView {
-        ollamaCheck.controlSize = .large
+        hermesCheck.controlSize = .large
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         styleButton(refreshButton)
@@ -654,7 +693,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
 
         let labelSpacer = NSView()
         labelSpacer.widthAnchor.constraint(equalToConstant: 96).isActive = true
-        let row = NSStackView(views: [labelSpacer, ollamaCheck, spacer, refreshButton])
+        let row = NSStackView(views: [labelSpacer, hermesCheck, spacer, refreshButton])
         row.orientation = .horizontal
         row.alignment = .centerY
         row.distribution = .fill
@@ -664,27 +703,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     }
 
     private func modelRow() -> NSView {
-        modelPopup.controlSize = .large
-        modelPopup.font = NSFont.systemFont(ofSize: 14)
-        modelPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
+        modelSummary.font = NSFont.systemFont(ofSize: 14)
+        modelSummary.textColor = .secondaryLabelColor
+        modelSummary.setContentHuggingPriority(.defaultLow, for: .horizontal)
         modelStatus.font = NSFont.systemFont(ofSize: 12)
         modelStatus.textColor = .tertiaryLabelColor
         modelStatus.widthAnchor.constraint(equalToConstant: 118).isActive = true
-
-        let label = NSTextField(labelWithString: "Ollama 模型")
+        let label = NSTextField(labelWithString: "纪要模型")
         label.font = NSFont.systemFont(ofSize: 14, weight: .medium)
         label.textColor = .secondaryLabelColor
         label.widthAnchor.constraint(equalToConstant: 96).isActive = true
-
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let row = NSStackView(views: [label, modelPopup, modelStatus, spacer])
+        let row = NSStackView(views: [label, modelSummary, modelStatus, spacer])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.distribution = .fill
         row.spacing = 12
-        modelPopup.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        row.setContentHuggingPriority(.defaultLow, for: .horizontal)
         return row
     }
 
@@ -732,13 +766,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     }
 
     private var defaultOutputDirectoryPath: String {
-        "\(NSHomeDirectory())/本地录音转录文件包/转录资料"
+        if let root = SharedKnowledgeLibraryLocator.root {
+            return root.appendingPathComponent("内容/转录", isDirectory: true).path
+        }
+        return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("本地音频转录/待处理", isDirectory: true).path
     }
 
     private func restoreOutputDirectory() {
         let savedPath = UserDefaults.standard.string(forKey: PreferenceKey.outputDirectory)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let savedPath, !savedPath.isEmpty {
+        if let savedPath, !savedPath.isEmpty, !savedPath.contains("本地录音转录文件包") {
             outputField.stringValue = savedPath
         } else {
             outputField.stringValue = defaultOutputDirectoryPath
@@ -814,48 +852,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         }
     }
 
-    @objc private func refreshModelsButton() {
-        refreshModels(silent: false)
+    private func defaultHermesCommand() -> String {
+        let candidates = [
+            NSHomeDirectory() + "/.local/bin/hermes",
+            NSHomeDirectory() + "/.hermes/hermes-agent/.hermes/bin/hermes",
+            "/opt/homebrew/bin/hermes",
+            "/usr/local/bin/hermes"
+        ]
+        return candidates.first { FileManager.default.isExecutableFile(atPath: $0) } ?? candidates[0]
     }
 
-    private func refreshModels(silent: Bool) {
-        modelStatus.stringValue = "正在刷新..."
-        if !silent {
-            appendLog("正在检测 Ollama 模型...")
+    @objc private func chooseHermes() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.title = "选择 Hermes 程序"
+        panel.directoryURL = URL(fileURLWithPath: hermesPathField.stringValue.expandingTildeInPath).deletingLastPathComponent()
+        if panel.runModal() == .OK, let url = panel.url {
+            hermesPathField.stringValue = url.path
+            checkHermes(silent: false)
         }
-        let urlString = ollamaURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @objc private func checkHermesButton() {
+        checkHermes(silent: false)
+    }
+
+    private func checkHermes(silent: Bool) {
+        let path = hermesPathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).expandingTildeInPath
+        modelStatus.stringValue = "正在检测..."
+        refreshButton.isEnabled = false
         DispatchQueue.global(qos: .userInitiated).async {
-            let models = self.fetchOllamaModels(baseURL: urlString.isEmpty ? "http://127.0.0.1:11434" : urlString)
+            let result = self.probeHermes(path: path)
             DispatchQueue.main.async {
-                switch models {
-                case .success(let names):
-                    self.modelPopup.removeAllItems()
-                    self.modelPopup.addItems(withTitles: names)
-                    self.modelStatus.stringValue = names.isEmpty ? "未发现模型" : "\(names.count) 个模型"
-                    if !silent {
-                        self.appendLog(names.isEmpty ? "Ollama 已连接，但没有发现模型。" : "Ollama 已连接。可用模型：\(names.joined(separator: "，"))")
-                    }
+                self.refreshButton.isEnabled = true
+                guard self.hermesPathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).expandingTildeInPath == path else { return }
+                switch result {
+                case .success:
+                    self.modelStatus.stringValue = "Hermes 已就绪"
+                    UserDefaults.standard.set(path, forKey: "hermesCommand")
+                    if !silent { self.appendLog("Hermes 程序检测通过，纪要使用 Hermes 当前配置的模型。") }
                 case .failure(let error):
-                    self.modelPopup.removeAllItems()
-                    self.modelStatus.stringValue = "未连接"
-                    if !silent {
-                        self.appendLog("Ollama 检测失败：\(error.localizedDescription)")
-                    }
+                    self.modelStatus.stringValue = "检测失败"
+                    if !silent { self.appendLog(error.localizedDescription) }
                 }
             }
         }
     }
 
-    private func fetchOllamaModels(baseURL: String) -> Result<[String], Error> {
+    private func probeHermes(path: String) -> Result<Void, Error> {
         do {
-            guard let url = URL(string: baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/api/tags") else {
-                throw NSError(domain: "LocalTranscriber", code: 1, userInfo: [NSLocalizedDescriptionKey: "Ollama 地址无效"])
+            guard FileManager.default.isExecutableFile(atPath: path) else {
+                throw NSError(domain: "LocalTranscriber", code: 1, userInfo: [NSLocalizedDescriptionKey: "未找到 Hermes，请选择本机可执行的 Hermes 程序。"])
             }
-            let data = try Data(contentsOf: url)
-            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            let models = json?["models"] as? [[String: Any]] ?? []
-            let names = models.compactMap { $0["name"] as? String }
-            return .success(names)
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: path)
+            process.arguments = ["chat", "--help"]
+            process.standardInput = FileHandle.nullDevice
+            var environment = ProcessInfo.processInfo.environment
+            for key in ["PYTHONHOME", "PYTHONPATH", "PYTHONNOUSERSITE", "VIRTUAL_ENV"] {
+                environment.removeValue(forKey: key)
+            }
+            environment["HOME"] = NSHomeDirectory()
+            environment["PATH"] = NSHomeDirectory() + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            process.environment = environment
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            try process.run()
+            let deadline = DispatchWorkItem {
+                if process.isRunning { process.terminate() }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 25, execute: deadline)
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            deadline.cancel()
+            let help = String(data: data, encoding: .utf8) ?? ""
+            guard process.terminationStatus == 0, help.contains("--query-file"), help.contains("stream-json") else {
+                throw NSError(domain: "LocalTranscriber", code: 2, userInfo: [NSLocalizedDescriptionKey: "Hermes 启动失败或版本过旧，请先在终端修复或升级 Hermes。"])
+            }
+            return .success(())
         } catch {
             return .failure(error)
         }
@@ -886,8 +963,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         }
         persistOutputDirectory()
         let chunkSeconds = automaticChunkSeconds(for: audioURL)
-        if ollamaCheck.state == .on && modelPopup.selectedItem == nil {
-            showAlert(title: "缺少 Ollama 模型", message: "请先刷新模型，并从下拉菜单选择一个本地模型。")
+        if hermesCheck.state == .on && !FileManager.default.isExecutableFile(atPath: hermesPathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).expandingTildeInPath) {
+            showAlert(title: "缺少 Hermes 程序", message: "请先选择本机 Hermes 程序并点击“检测 Hermes”。")
             return
         }
 
@@ -913,10 +990,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             outputDir: outputDir,
             chunkSeconds: chunkSeconds,
             buildWord: wordCheck.state == .on,
-            useOllama: ollamaCheck.state == .on,
+            useHermes: hermesCheck.state == .on,
             title: titleField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-            ollamaURL: ollamaURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-            modelName: modelPopup.selectedItem?.title
+            hermesCommand: hermesPathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).expandingTildeInPath
         )
 
         appendLog("")
@@ -955,9 +1031,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     }
 
     private func runPipeline(_ config: JobConfig) throws -> URL {
-        let localMediaURL = try copyOriginalMedia(config.audioURL, to: config.outputDir)
-        let transcript = config.outputDir.appendingPathComponent("\(localMediaURL.deletingPathExtension().lastPathComponent)_transcript.txt")
-        let chunks = config.outputDir.appendingPathComponent("chunks")
+        let workDir = FileManager.default.temporaryDirectory.appendingPathComponent("MyJarvisTranscription-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        let localMediaURL = config.audioURL
+        let transcript = workDir.appendingPathComponent("\(localMediaURL.deletingPathExtension().lastPathComponent)_transcript.txt")
+        let chunks = workDir.appendingPathComponent("chunks")
 
         try runPython([
             script("transcribe_funasr_chunks.py"),
@@ -974,7 +1053,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                 script("build_transcript_doc.py"),
                 localMediaURL.path,
                 "--transcript", transcript.path,
-                "--output-dir", config.outputDir.path
+                "--output-dir", workDir.path
             ]
             if !config.title.isEmpty {
                 args += ["--title", config.title]
@@ -984,42 +1063,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
 
         if cancelled { throw CancellationError() }
 
-        if config.useOllama, let selectedModel = config.modelName {
+        // Preserve completed transcription even if Hermes is unavailable or cancelled.
+        try FileManager.default.createDirectory(at: config.outputDir, withIntermediateDirectories: true)
+        for source in try FileManager.default.contentsOfDirectory(at: workDir, includingPropertiesForKeys: nil) {
+            guard ["txt", "md", "docx"].contains(source.pathExtension.lowercased()) else { continue }
+            let destination = config.outputDir.appendingPathComponent(source.lastPathComponent)
+            if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
+            try FileManager.default.copyItem(at: source, to: destination)
+        }
+        let savedTranscript = config.outputDir.appendingPathComponent(transcript.lastPathComponent)
+        var selectedPreview: URL?
+        if config.useHermes {
             let minutesTitle = config.title.isEmpty ? "\(localMediaURL.deletingPathExtension().lastPathComponent) 重点大纲与会议纪要" : config.title
             try runPython([
-                script("ollama_meeting_minutes.py"),
-                "--transcript", transcript.path,
+                script("hermes_meeting_minutes.py"),
+                "--transcript", savedTranscript.path,
                 "--output-dir", config.outputDir.path,
                 "--title", minutesTitle,
-                "--ollama-url", config.ollamaURL,
-                "--model", selectedModel
+                "--hermes-command", config.hermesCommand
             ])
             let minutesMarkdown = config.outputDir.appendingPathComponent("\(transcript.deletingPathExtension().lastPathComponent)_重点大纲与会议纪要.md")
             if FileManager.default.fileExists(atPath: minutesMarkdown.path) {
-                return minutesMarkdown
+                selectedPreview = minutesMarkdown
             }
         }
-        let transcriptMarkdown = config.outputDir.appendingPathComponent("\(localMediaURL.deletingPathExtension().lastPathComponent)_转录文档.md")
-        if config.buildWord, FileManager.default.fileExists(atPath: transcriptMarkdown.path) {
-            return transcriptMarkdown
+        if selectedPreview == nil {
+            let transcriptMarkdown = config.outputDir.appendingPathComponent("\(localMediaURL.deletingPathExtension().lastPathComponent)_转录文档.md")
+            if config.buildWord, FileManager.default.fileExists(atPath: transcriptMarkdown.path) {
+                selectedPreview = transcriptMarkdown
+            }
         }
-        return transcript
+        return selectedPreview ?? savedTranscript
     }
 
     private func copyOriginalMedia(_ sourceURL: URL, to outputDir: URL) throws -> URL {
-        let mediaDir = outputDir.appendingPathComponent("原始录音资料")
-        try FileManager.default.createDirectory(at: mediaDir, withIntermediateDirectories: true)
-        let destinationURL = mediaDir.appendingPathComponent(sourceURL.lastPathComponent)
-
-        if sourceURL.standardizedFileURL.path == destinationURL.standardizedFileURL.path {
-            return destinationURL
-        }
-
-        if FileManager.default.fileExists(atPath: destinationURL.path) {
-            try FileManager.default.removeItem(at: destinationURL)
-        }
-        try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-        return destinationURL
+        return sourceURL
     }
 
     private func script(_ name: String) -> String {
@@ -1095,7 +1173,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         appendLog("")
         appendLog("完成。输出目录：\(outputDir.path)")
         loadPreview(from: previewURL)
-        showAlert(title: "转录完成", message: "已生成到：\n\(outputDir.path)")
+        let alert = NSAlert()
+        alert.messageText = "转录完成"
+        alert.informativeText = "已生成到：\n\(outputDir.path)"
+        alert.addButton(withTitle: "暂不入库")
+        alert.addButton(withTitle: "选择项目库并存入…")
+        if alert.runModal() == .alertSecondButtonReturn { publishReport() }
     }
 
     private func finishCancelled() {
@@ -1129,6 +1212,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private func loadPreview(from url: URL) {
         previewFileURL = url
         openPreviewButton.isEnabled = true
+        publishReportButton.isEnabled = true
         do {
             let text = try String(contentsOf: url, encoding: .utf8)
             previewView.string = readablePreview(from: text, fileURL: url)
@@ -1139,6 +1223,103 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             previewView.string = "预览加载失败：\(error.localizedDescription)\n\n文件位置：\(url.path)"
             showResultPane(0)
             appendLog("预览加载失败：\(error.localizedDescription)")
+        }
+    }
+
+    @objc private func chooseExistingReport() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.plainText, UTType(filenameExtension: "md")!]
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url { loadPreview(from: url) }
+    }
+
+    @objc private func publishReport() {
+        guard let report = previewFileURL else { return }
+        var root = SharedKnowledgeLibraryLocator.root
+        if root == nil {
+            let panel = NSOpenPanel()
+            panel.message = "选择 Syncthing 同步的“我的知识库”文件夹"
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            guard panel.runModal() == .OK, let selected = panel.url,
+                  let marker = try? Data(contentsOf: selected.appendingPathComponent(".knowledge-library.json")),
+                  let object = try? JSONSerialization.jsonObject(with: marker) as? [String: Any],
+                  object["libraryID"] as? String == "my-knowledge-library-v1" else { return }
+            let config = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/My Knowledge Library/location.json")
+            do {
+                try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let value: [String: Any] = ["schemaVersion": 1, "libraryID": "my-knowledge-library-v1", "relativePath": "我的知识库", "rootPath": selected.path]
+                try JSONSerialization.data(withJSONObject: value).write(to: config, options: .atomic)
+                root = selected
+            } catch { showAlert(title: "保存位置失败", message: error.localizedDescription); return }
+        }
+        guard let root else { return }
+        let metadata = root.appendingPathComponent("元数据/LocalMind")
+        var projects: [[String: Any]] = []
+        for file in (try? FileManager.default.contentsOfDirectory(at: metadata, includingPropertiesForKeys: nil)) ?? [] {
+            guard file.lastPathComponent.hasPrefix("projects-"), !file.lastPathComponent.contains("sync-conflict"),
+                  let data = try? Data(contentsOf: file),
+                  let record = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let value = record["value"] as? [String: Any] else { continue }
+            projects.append(value)
+        }
+        guard !projects.isEmpty else {
+            showAlert(title: "暂未读取到项目库", message: "请先打开更新后的知识库网站，并等待 Syncthing 完成元数据同步。")
+            return
+        }
+        projects.sort { ($0["name"] as? String ?? "") < ($1["name"] as? String ?? "") }
+        let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 30))
+        picker.addItems(withTitles: projects.map { $0["name"] as? String ?? "未命名项目库" })
+        let alert = NSAlert()
+        alert.messageText = "存入哪个项目库？"
+        alert.informativeText = report.lastPathComponent
+        alert.accessoryView = picker
+        alert.addButton(withTitle: "存入")
+        alert.addButton(withTitle: "取消")
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let projectID = projects[picker.indexOfSelectedItem]["id"] as? String else { return }
+        publishReportButton.isEnabled = false
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let process = Process()
+                process.executableURL = self.pythonURL
+                process.arguments = [self.script("knowledge_library.py"), "publish", "--library", root.path, "--report", report.path, "--project-id", projectID]
+                var env = ProcessInfo.processInfo.environment
+                let resources = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources")
+                env["PYTHONHOME"] = resources.appendingPathComponent("Python.framework/Versions/3.11").path
+                env["PYTHONPATH"] = resources.appendingPathComponent("runtime/lib/python3.11/site-packages").path
+                env["PYTHONDONTWRITEBYTECODE"] = "1"
+                env["PYTHONNOUSERSITE"] = "1"
+                process.environment = env
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
+                try process.run()
+                let bytes = pipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                let response = (try? JSONSerialization.jsonObject(with: bytes) as? [String: Any]) ?? [:]
+                guard process.terminationStatus == 0, let id = response["id"] as? String else {
+                    throw NSError(domain: "KnowledgeLibrary", code: 1, userInfo: [NSLocalizedDescriptionKey: response["error"] as? String ?? String(data: bytes, encoding: .utf8) ?? "发布失败"])
+                }
+                DispatchQueue.main.async {
+                    self.publishReportButton.isEnabled = true
+                    let done = NSAlert()
+                    done.messageText = response["duplicate"] as? Bool == true ? "该报告已在项目库中" : "已存入知识库"
+                    done.informativeText = "报告和项目归属会通过 Syncthing 同步到另一台电脑。"
+                    done.addButton(withTitle: "在网站查看")
+                    done.addButton(withTitle: "完成")
+                    if done.runModal() == .alertFirstButtonReturn {
+                        var url = URLComponents(string: "http://localhost:3000/workspace")!
+                        url.queryItems = [URLQueryItem(name: "projectId", value: projectID), URLQueryItem(name: "reportId", value: id)]
+                        NSWorkspace.shared.open(url.url!)
+                    }
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.publishReportButton.isEnabled = true
+                    self.showAlert(title: "存入失败", message: error.localizedDescription)
+                }
+            }
         }
     }
 

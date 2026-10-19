@@ -5,8 +5,9 @@ import argparse
 import json
 import re
 import textwrap
-import urllib.error
-import urllib.request
+import signal
+
+from hermes_client import HermesClient, check_hermes
 from datetime import datetime
 from pathlib import Path
 
@@ -16,108 +17,11 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
-DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
 TIME_RE = re.compile(r"^\[(?P<start>\d\d:\d\d:\d\d) - (?P<end>\d\d:\d\d:\d\d)\]\s*(?P<text>.*)$")
 
 BLACK = RGBColor(0, 0, 0)
 BLUE = RGBColor(46, 116, 181)
 MUTED = RGBColor(90, 90, 90)
-
-
-def normalize_url(url: str) -> str:
-    return url.rstrip("/")
-
-
-def request_json(url: str, payload: dict | None = None, timeout: int = 600) -> dict:
-    data = None
-    headers = {}
-    if payload is not None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"无法连接 Ollama：{exc}") from exc
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("Ollama 返回内容不是有效 JSON。") from exc
-
-
-def request_json_stream(url: str, payload: dict, timeout: int = 900):
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            for raw_line in response:
-                line = raw_line.decode("utf-8").strip()
-                if not line:
-                    continue
-                try:
-                    yield json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise RuntimeError("Ollama 流式返回内容不是有效 JSON。") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"无法连接 Ollama：{exc}") from exc
-
-
-def list_models(ollama_url: str) -> list[str]:
-    data = request_json(f"{normalize_url(ollama_url)}/api/tags", timeout=20)
-    models = data.get("models", [])
-    return [model.get("name", "") for model in models if model.get("name")]
-
-
-def choose_model(ollama_url: str, preferred: str | None = None) -> str:
-    if preferred:
-        return preferred
-    models = list_models(ollama_url)
-    if not models:
-        raise RuntimeError("Ollama 当前没有可用模型。请先在终端运行：ollama pull qwen2.5:7b")
-    priority = ("qwen", "deepseek", "glm", "yi", "llama", "mistral")
-    for key in priority:
-        for model in models:
-            if key in model.lower():
-                return model
-    return models[0]
-
-
-def ollama_generate(ollama_url: str, model: str, prompt: str, temperature: float, num_ctx: int, num_predict: int) -> str:
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "你是严谨的中文会议记录助手。只输出用户要求的最终内容，不输出推理过程。不要使用 LaTeX、数学公式或 $...$ 包裹符号。",
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        "stream": True,
-        "think": False,
-        "options": {
-            "temperature": temperature,
-            "num_ctx": num_ctx,
-            "num_predict": num_predict,
-        },
-    }
-    parts = []
-    reported_chars = 0
-    for data in request_json_stream(f"{normalize_url(ollama_url)}/api/chat", payload=payload, timeout=900):
-        if data.get("error"):
-            raise RuntimeError(f"Ollama 生成失败：{data['error']}")
-        content = data.get("message", {}).get("content", "")
-        if content:
-            parts.append(content)
-            current_chars = sum(len(part) for part in parts)
-            if current_chars - reported_chars >= 120:
-                reported_chars = current_chars
-                print(f"Ollama generated {current_chars} characters...", flush=True)
-    response = "".join(parts).strip()
-    if not response:
-        raise RuntimeError(f"Ollama 没有返回有效内容。请尝试更换模型或增大 num_ctx。模型：{model}")
-    return response
 
 
 def read_transcript(transcript_path: Path) -> str:
@@ -139,13 +43,17 @@ def read_transcript(transcript_path: Path) -> str:
 
 
 def split_text(text: str, max_chars: int) -> list[str]:
+    if max_chars <= 0:
+        raise ValueError("max_chars must be positive")
     if len(text) <= max_chars:
         return [text]
 
     chunks = []
     current = []
     current_len = 0
-    for line in text.splitlines():
+    lines = [line[start:start + max_chars] for line in text.splitlines()
+             for start in range(0, max(1, len(line)), max_chars)]
+    for line in lines:
         line_len = len(line) + 1
         if current and current_len + line_len > max_chars:
             chunks.append("\n".join(current))
@@ -269,7 +177,7 @@ def final_prompt(source: str, title: str) -> str:
         - ...
 
         ## 原始转写风险提示
-        - 本纪要由本地 Ollama 大模型根据自动转写生成，关键事实仍需结合原录音复核。
+        - 本纪要由本机 Hermes 根据自动转写生成，关键事实仍需结合原录音复核。
 
         输入内容：
         {source}
@@ -386,7 +294,7 @@ def build_docx(markdown_text: str, transcript_path: Path, model: str, output_pat
 
     footer = section.footer.paragraphs[0]
     footer.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-    set_run_font(footer.add_run("Generated locally with Ollama; review key facts against the original audio."), size=8.5, color=MUTED)
+    set_run_font(footer.add_run("Generated with Hermes; review key facts against the original audio."), size=8.5, color=MUTED)
 
     for line in markdown_text.splitlines():
         add_markdown_line(doc, line)
@@ -395,7 +303,7 @@ def build_docx(markdown_text: str, transcript_path: Path, model: str, output_pat
     para_spacing(p, before=12, after=4)
     set_run_font(p.add_run("生成信息"), size=12.5, bold=True, color=BLUE)
     for label, value in [
-        ("Ollama 模型", model),
+        ("Hermes 模型", model),
         ("转写文件", str(transcript_path)),
         ("生成时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
     ]:
@@ -407,28 +315,34 @@ def build_docx(markdown_text: str, transcript_path: Path, model: str, output_pat
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate an outline and meeting minutes from a transcript with local Ollama.")
+    parser = argparse.ArgumentParser(description="Generate an outline and meeting minutes using the installed Hermes CLI.")
     parser.add_argument("--transcript", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--title", default="录音重点大纲与会议纪要")
-    parser.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
-    parser.add_argument("--model", default=None)
+    parser.add_argument("--hermes-command", default=None)
+    parser.add_argument("--timeout", type=float, default=900)
     parser.add_argument("--chunk-chars", type=int, default=5500)
-    parser.add_argument("--num-ctx", type=int, default=12288)
-    parser.add_argument("--num-predict", type=int, default=4200)
-    parser.add_argument("--temperature", type=float, default=0.2)
     args = parser.parse_args()
 
     transcript_path = Path(args.transcript).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    model = choose_model(args.ollama_url, args.model.strip() if args.model else None)
+    if args.chunk_chars <= 0 or args.timeout <= 0:
+        parser.error("--chunk-chars 和 --timeout 必须大于 0")
+    client = HermesClient(check_hermes(args.hermes_command), timeout=args.timeout)
+
+    def cancel(signum, _frame):
+        client.cancel()
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, cancel)
+    signal.signal(signal.SIGINT, cancel)
     transcript = read_transcript(transcript_path)
     chunks = split_text(transcript, args.chunk_chars)
 
-    print(f"Ollama URL: {normalize_url(args.ollama_url)}", flush=True)
-    print(f"Ollama model: {model}", flush=True)
+    print(f"Hermes 程序：{client.command}", flush=True)
+    print("纪要使用 Hermes 当前配置的模型。", flush=True)
     print(f"Transcript chunks: {len(chunks)}", flush=True)
 
     if len(chunks) == 1:
@@ -437,21 +351,21 @@ def main() -> None:
         summaries = []
         for idx, chunk in enumerate(chunks, start=1):
             print(f"Summarizing chunk {idx}/{len(chunks)}...", flush=True)
-            summaries.append(ollama_generate(args.ollama_url, model, chunk_prompt(chunk, idx, len(chunks)), args.temperature, args.num_ctx, args.num_predict))
+            summaries.append(client.generate(chunk_prompt(chunk, idx, len(chunks))))
         source = "\n\n".join(f"## 分段摘要 {idx}\n{summary}" for idx, summary in enumerate(summaries, start=1))
 
     print("Generating final outline and meeting minutes...", flush=True)
     markdown_text = normalize_generated_markdown(
-        ollama_generate(args.ollama_url, model, final_prompt(source, args.title), args.temperature, args.num_ctx, args.num_predict)
+        client.generate(final_prompt(source, args.title))
     )
 
     md_path = output_dir / f"{transcript_path.stem}_重点大纲与会议纪要.md"
     docx_path = output_dir / f"{transcript_path.stem}_重点大纲与会议纪要.docx"
     md_path.write_text(markdown_text + "\n", encoding="utf-8")
-    build_docx(markdown_text, transcript_path, model, docx_path)
+    build_docx(markdown_text, transcript_path, client.model, docx_path)
 
-    print(f"Saved Ollama Markdown: {md_path}", flush=True)
-    print(f"Saved Ollama Word document: {docx_path}", flush=True)
+    print(f"Saved Hermes Markdown: {md_path}", flush=True)
+    print(f"Saved Hermes Word document: {docx_path}", flush=True)
 
 
 if __name__ == "__main__":

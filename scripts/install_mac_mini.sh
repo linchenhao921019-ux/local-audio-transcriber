@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VENV_DIR="${CODEX_AUDIO_TRANSCRIBE_VENV:-$HOME/.codex/venvs/audio-transcriber}"
 
 python3 -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python" -m pip install --upgrade pip wheel "setuptools<81"
 "$VENV_DIR/bin/python" -m pip install -r "$TOOL_DIR/requirements.txt"
-"$VENV_DIR/bin/python" "$TOOL_DIR/patch_funasr_onnx.py"
+"$VENV_DIR/bin/python" "$TOOL_DIR/src/patch_funasr_onnx.py"
 
 cat <<EOF
 Installed audio transcription environment:

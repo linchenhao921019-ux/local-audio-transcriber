@@ -1,4 +1,5 @@
 .DS_Store
+.metadata_never_index
 __pycache__/
 *.py[cod]
 
@@ -8,6 +9,7 @@ outputs/
 docx_rendered/
 chunks/
 dist/
+dist.noindex/
 
 # Bundled/offline model caches are too large for git.
 modelscope_cache/
@@ -26,3 +28,6 @@ sample_transcript_*.txt
 
 # Native build artifacts
 transcribe_speech
+work/
+.syncthing.*.tmp
+models/

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-TOOL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TOOL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 APP_NAME="本地音频转录"
-APP="$TOOL_DIR/dist/$APP_NAME.app"
-DMG_DIR="$TOOL_DIR/dist"
+APP="$TOOL_DIR/dist.noindex/$APP_NAME.app"
+DMG_DIR="$TOOL_DIR/dist.noindex"
 DMG_NAME="${DMG_NAME:-default.dmg}"
 DMG="$DMG_DIR/$DMG_NAME"
 STAGING="$DMG_DIR/dmg-staging"
 
 if [[ ! -d "$APP" ]]; then
   echo "App not found. Build it first:" >&2
-  echo "  $TOOL_DIR/build_mac_app.sh" >&2
+  echo "  $TOOL_DIR/scripts/build_mac_app.sh" >&2
   exit 1
 fi
 

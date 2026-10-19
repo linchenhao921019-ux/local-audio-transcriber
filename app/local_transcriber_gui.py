@@ -4,14 +4,15 @@ import queue
 import subprocess
 import sys
 import threading
-import urllib.error
-import urllib.request
 from pathlib import Path
 from tkinter import BooleanVar, PhotoImage, StringVar, Tk, filedialog, messagebox, scrolledtext
 from tkinter import ttk
 
 
 APP_DIR = Path(__file__).resolve().parent
+SCRIPT_DIR = APP_DIR if (APP_DIR / "hermes_client.py").exists() else APP_DIR.parent / "src"
+sys.path.insert(0, str(SCRIPT_DIR))
+from hermes_client import check_hermes, resolve_hermes
 
 BLUE = "#1d5fd1"
 BLUE_DARK = "#154aa3"
@@ -37,17 +38,15 @@ class TranscriberApp:
         self.title_var = StringVar()
         self.chunk_var = StringVar(value="180")
         self.doc_var = BooleanVar(value=True)
-        self.ollama_var = BooleanVar(value=False)
-        self.ollama_url_var = StringVar(value="http://127.0.0.1:11434")
-        self.ollama_model_var = StringVar()
-        self.ollama_models: list[str] = []
+        self.hermes_var = BooleanVar(value=False)
+        self.hermes_command_var = StringVar(value=str(Path.home() / ".local/bin/hermes"))
         self.running = False
         self.log_queue: queue.Queue[str] = queue.Queue()
 
         self._configure_style()
         self._build_ui()
         self._poll_log()
-        self.check_ollama(silent=True)
+        self.check_hermes(silent=True)
 
     def _set_window_icon(self):
         icon_path = APP_DIR / "AppIcon.png"
@@ -94,7 +93,7 @@ class TranscriberApp:
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="本地音频转录", style="HeaderTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(header, text="离线转写录音，并可调用本机 Ollama 生成重点大纲和会议纪要", style="HeaderSub.TLabel").grid(row=1, column=0, sticky="w", pady=(5, 0))
+        ttk.Label(header, text="离线转写录音，并可调用本机 Hermes 生成重点大纲和会议纪要", style="HeaderSub.TLabel").grid(row=1, column=0, sticky="w", pady=(5, 0))
 
         main = ttk.Frame(root, style="Panel.TFrame", padding=(22, 18))
         main.grid(row=1, column=0, sticky="ew", pady=(16, 14))
@@ -111,18 +110,18 @@ class TranscriberApp:
         ttk.Entry(chunk_row, textvariable=self.chunk_var, width=10).grid(row=0, column=0, sticky="w")
         ttk.Checkbutton(chunk_row, text="生成 Word 文档", variable=self.doc_var).grid(row=0, column=1, sticky="w", padx=(18, 0))
 
-        ttk.Label(main, text="Ollama 纪要", style="Section.TLabel").grid(row=5, column=0, columnspan=3, sticky="w", pady=(22, 12))
-        ttk.Checkbutton(main, text="用 Ollama 生成重点大纲和会议纪要", variable=self.ollama_var).grid(row=6, column=1, sticky="w")
-        ttk.Button(main, text="刷新模型", command=self.check_ollama, style="Ghost.TButton").grid(row=6, column=2, sticky="ew", padx=(12, 0))
+        ttk.Label(main, text="Hermes 纪要", style="Section.TLabel").grid(row=5, column=0, columnspan=3, sticky="w", pady=(22, 12))
+        ttk.Checkbutton(main, text="用 Hermes 生成重点大纲和会议纪要", variable=self.hermes_var).grid(row=6, column=1, sticky="w")
+        ttk.Button(main, text="检测 Hermes", command=self.check_hermes, style="Ghost.TButton").grid(row=6, column=2, sticky="ew", padx=(12, 0))
 
-        ttk.Label(main, text="Ollama 地址", style="Field.TLabel").grid(row=7, column=0, sticky="w", pady=(10, 0), padx=(0, 12))
-        ttk.Entry(main, textvariable=self.ollama_url_var).grid(row=7, column=1, sticky="ew", pady=(10, 0))
+        ttk.Label(main, text="Hermes 程序", style="Field.TLabel").grid(row=7, column=0, sticky="w", pady=(10, 0), padx=(0, 12))
+        ttk.Entry(main, textvariable=self.hermes_command_var).grid(row=7, column=1, sticky="ew", pady=(10, 0))
         ttk.Label(main, text="默认本机", style="Hint.TLabel").grid(row=7, column=2, sticky="w", pady=(10, 0), padx=(12, 0))
 
-        ttk.Label(main, text="Ollama 模型", style="Field.TLabel").grid(row=8, column=0, sticky="w", pady=(10, 0), padx=(0, 12))
-        self.model_combo = ttk.Combobox(main, textvariable=self.ollama_model_var, state="readonly", values=(), height=8)
+        ttk.Label(main, text="纪要模型", style="Field.TLabel").grid(row=8, column=0, sticky="w", pady=(10, 0), padx=(0, 12))
+        self.model_combo = ttk.Label(main, text="沿用 Hermes 当前配置", style="Hint.TLabel")
         self.model_combo.grid(row=8, column=1, sticky="ew", pady=(10, 0))
-        self.model_hint = ttk.Label(main, text="点击刷新模型后选择", style="Hint.TLabel")
+        self.model_hint = ttk.Label(main, text="待检测", style="Hint.TLabel")
         self.model_hint.grid(row=8, column=2, sticky="w", pady=(10, 0), padx=(12, 0))
 
         action_row = ttk.Frame(main, style="White.TFrame")
@@ -157,7 +156,7 @@ class TranscriberApp:
         self.log.grid(row=1, column=0, sticky="nsew")
 
         self._append_log("本工具在本机离线运行，适合中文普通话录音。")
-        self._append_log("如需重点大纲和会议纪要，请先启动本机 Ollama，然后点击“刷新模型”并选择模型。")
+        self._append_log("如需重点大纲和会议纪要，请选择本机 Hermes 程序，然后点击“检测 Hermes”。")
 
     def _field(self, parent, row, label, variable, button_text, button_command, hint=None):
         ttk.Label(parent, text=label, style="Field.TLabel").grid(row=row, column=0, sticky="w", pady=(10, 0), padx=(0, 12))
@@ -190,41 +189,19 @@ class TranscriberApp:
         out.mkdir(parents=True, exist_ok=True)
         subprocess.run(["open", str(out)], check=False)
 
-    def check_ollama(self, silent=False):
+    def check_hermes(self, silent=False):
         if self.running:
             return
-        url = self.ollama_url_var.get().strip().rstrip("/") or "http://127.0.0.1:11434"
-        if not silent:
-            self.model_hint.configure(text="正在刷新...")
-            self._append_log("正在检测 Ollama 模型...")
-        thread = threading.Thread(target=self._check_ollama_worker, args=(url, silent), daemon=True)
-        thread.start()
+        command = self.hermes_command_var.get().strip()
+        self.model_hint.configure(text="正在检测...")
+        threading.Thread(target=self._check_hermes_worker, args=(command, silent), daemon=True).start()
 
-    def _check_ollama_worker(self, url: str, silent: bool):
+    def _check_hermes_worker(self, command: str, silent: bool):
         try:
-            req = urllib.request.Request(f"{url}/api/tags")
-            with urllib.request.urlopen(req, timeout=10) as response:
-                data = json.loads(response.read().decode("utf-8"))
-            models = [model.get("name", "") for model in data.get("models", []) if model.get("name")]
-            self.log_queue.put("MODELS::" + json.dumps({"models": models, "silent": silent}, ensure_ascii=False))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            self.log_queue.put("MODELS_ERROR::" + json.dumps({"error": str(exc), "silent": silent}, ensure_ascii=False))
-
-    def _update_models(self, models: list[str], silent: bool):
-        self.ollama_models = models
-        self.model_combo.configure(values=models)
-        current = self.ollama_model_var.get().strip()
-        if models:
-            if current not in models:
-                self.ollama_model_var.set(models[0])
-            self.model_hint.configure(text=f"{len(models)} 个模型")
-            if not silent:
-                self._append_log("Ollama 已连接。可用模型：" + "，".join(models))
-        else:
-            self.ollama_model_var.set("")
-            self.model_hint.configure(text="未发现模型")
-            if not silent:
-                self._append_log("Ollama 已连接，但没有发现模型。请先在终端运行：ollama pull qwen2.5:7b")
+            path = check_hermes(command)
+            self.log_queue.put("HERMES::" + json.dumps({"path": path, "silent": silent}, ensure_ascii=False))
+        except Exception as exc:
+            self.log_queue.put("HERMES_ERROR::" + json.dumps({"error": str(exc), "silent": silent}, ensure_ascii=False))
 
     def start(self):
         if self.running:
@@ -240,9 +217,12 @@ class TranscriberApp:
         except ValueError:
             messagebox.showerror("分段秒数无效", "分段秒数请输入正数，例如 180。")
             return
-        if self.ollama_var.get() and not self.ollama_model_var.get().strip():
-            messagebox.showerror("缺少 Ollama 模型", "请先点击“刷新模型”，并从下拉框选择一个本地模型。")
-            return
+        if self.hermes_var.get():
+            try:
+                resolve_hermes(self.hermes_command_var.get().strip())
+            except RuntimeError as exc:
+                messagebox.showerror("缺少 Hermes 程序", str(exc))
+                return
 
         output_root = Path(self.output_var.get()).expanduser()
         output_dir = output_root / audio.stem
@@ -257,12 +237,11 @@ class TranscriberApp:
 
         title = self.title_var.get().strip()
         build_doc = self.doc_var.get()
-        use_ollama = self.ollama_var.get()
-        ollama_url = self.ollama_url_var.get().strip() or "http://127.0.0.1:11434"
-        ollama_model = self.ollama_model_var.get().strip()
+        use_hermes = self.hermes_var.get()
+        hermes_command = self.hermes_command_var.get().strip()
         thread = threading.Thread(
             target=self._run_job,
-            args=(audio, output_dir, chunk_seconds, title, build_doc, use_ollama, ollama_url, ollama_model),
+            args=(audio, output_dir, chunk_seconds, title, build_doc, use_hermes, hermes_command),
             daemon=True,
         )
         thread.start()
@@ -274,16 +253,15 @@ class TranscriberApp:
         chunk_seconds: float,
         title: str,
         build_doc: bool,
-        use_ollama: bool,
-        ollama_url: str,
-        ollama_model: str,
+        use_hermes: bool,
+        hermes_command: str,
     ):
         try:
             transcript = output_dir / f"{audio.stem}_transcript.txt"
             chunks = output_dir / "chunks"
             cmd = [
                 sys.executable,
-                str(APP_DIR / "transcribe_funasr_chunks.py"),
+                str(SCRIPT_DIR / "transcribe_funasr_chunks.py"),
                 str(audio),
                 "--output",
                 str(transcript),
@@ -297,7 +275,7 @@ class TranscriberApp:
             if build_doc:
                 cmd = [
                     sys.executable,
-                    str(APP_DIR / "build_transcript_doc.py"),
+                    str(SCRIPT_DIR / "build_transcript_doc.py"),
                     str(audio),
                     "--transcript",
                     str(transcript),
@@ -308,21 +286,19 @@ class TranscriberApp:
                     cmd.extend(["--title", title])
                 self._stream_command(cmd)
 
-            if use_ollama:
+            if use_hermes:
                 minutes_title = title or f"{audio.stem} 重点大纲与会议纪要"
                 cmd = [
                     sys.executable,
-                    str(APP_DIR / "ollama_meeting_minutes.py"),
+                    str(SCRIPT_DIR / "hermes_meeting_minutes.py"),
                     "--transcript",
                     str(transcript),
                     "--output-dir",
                     str(output_dir),
                     "--title",
                     minutes_title,
-                    "--ollama-url",
-                    ollama_url,
-                    "--model",
-                    ollama_model,
+                    "--hermes-command",
+                    hermes_command,
                 ]
                 self._stream_command(cmd)
 
@@ -354,14 +330,16 @@ class TranscriberApp:
         try:
             while True:
                 msg = self.log_queue.get_nowait()
-                if msg.startswith("MODELS::"):
+                if msg.startswith("HERMES::"):
                     payload = json.loads(msg.split("::", 1)[1])
-                    self._update_models(payload["models"], payload["silent"])
-                elif msg.startswith("MODELS_ERROR::"):
-                    payload = json.loads(msg.split("::", 1)[1])
-                    self.model_hint.configure(text="未连接")
+                    self.model_hint.configure(text="Hermes 已就绪")
                     if not payload["silent"]:
-                        self._append_log(f"Ollama 检测失败：{payload['error']}")
+                        self._append_log("Hermes 程序检测通过，使用当前模型配置。")
+                elif msg.startswith("HERMES_ERROR::"):
+                    payload = json.loads(msg.split("::", 1)[1])
+                    self.model_hint.configure(text="检测失败")
+                    if not payload["silent"]:
+                        self._append_log(f"Hermes 检测失败：{payload['error']}")
                 elif msg.startswith("DONE::"):
                     out = msg.split("::", 1)[1]
                     self._append_log("")
